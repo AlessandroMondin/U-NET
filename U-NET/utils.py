@@ -11,16 +11,17 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from dataset import DAVIS2017
 from config import (
-        IMAGE_HEIGHT,
-        IMAGE_WIDTH,
-        DEVICE,
-        PAD_MIRRORING
+    IMAGE_HEIGHT,
+    IMAGE_WIDTH,
+    DEVICE,
+    PAD_MIRRORING
 )
 
 
 # converts a torch.Tensor to np.array, removes the batch_dim, if array has more than one channel
 # it transposes it from (CHANNELS, HEIGHT, WIDTH) to (HEIGHT, WIDTH, CHANNELS)
 def tens2image(im):
+    im = im.cpu()
     # removing batch size
     tmp = np.squeeze(im.numpy())
     # if greyscale
@@ -31,11 +32,11 @@ def tens2image(im):
         return tmp.transpose((1, 2, 0))
 
 
-def overlay_mask(im, ma, color=np.array([255, 0, 0])/255.0):
+def overlay_mask(im, ma, color=np.array([255, 0, 0]) / 255.0):
     assert np.max(im) <= 255, "RGB channels' value cannot exceed 255"
 
     # float to bool means: each not-0 is set to 1, each 0 is kept 0
-    ma = ma.astype(np.bool)
+    ma = (ma > 0.5).astype(np.float32)
     im = im.astype(np.uint8)
 
     alpha = 0.5
@@ -64,7 +65,7 @@ def overlay_mask(im, ma, color=np.array([255, 0, 0])/255.0):
     # cv2.findContours(image, mode, method)
     contours, _ = cv2.findContours(ma.copy().astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    #cv2.drawContours(image, contours, colourIdx, color, thickness)
+    # cv2.drawContours(image, contours, colourIdx, color, thickness)
     cv2.drawContours(bg, contours, -1, (0, 0, 0), 1)
 
     return bg
@@ -79,12 +80,12 @@ def inv_normalize(im):
 
 
 def get_loaders(
-    db_root_dir,
-    batch_size,
-    train_transform,
-    val_transform,
-    num_workers=4,
-    pin_memory=True,
+        db_root_dir,
+        batch_size,
+        train_transform,
+        val_transform,
+        num_workers=4,
+        pin_memory=True,
 ):
     train_ds = DAVIS2017(train=True, db_root_dir=db_root_dir, transform=train_transform,
                          pad_mirroring=PAD_MIRRORING)
@@ -115,106 +116,141 @@ def get_loaders(
 
 
 # define train_loop
-def train_loop(model, loader, optim, loss_fn):
-
-    loop = tqdm(loader, position=0, leave=True)
-    for image, mask in loader:
+def train_loop(model, loader, optim, loss_fn, scaler, pos_weight=False):
+    loop = tqdm(loader)
+    loss_20_batches = 0
+    for idx, (image, mask) in enumerate(loop):
         # transferring data to cpu or gpu
         image = image.to(DEVICE)
-        mask = mask.to(DEVICE).unsqueeze(dim=1)
+        mask = mask.float().unsqueeze(dim=1).to(DEVICE)
 
-        # feedforward
-        out = model(image)
-        loss = loss_fn(out, mask)
+        # float16 training: reduces the load to the VRAM and speeds up the training
+        with torch.cuda.amp.autocast():
+            out = model(image)
+            if pos_weight:
+                loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=(mask==0.).sum()/mask.sum())
+            loss = loss_fn(out, mask)
+            loss_20_batches += loss
 
         # backpropagation
-        loss.backward()
-        optim.step()
+        # check docs here https://pytorch.org/docs/stable/amp.html
         optim.zero_grad()
+        scaler.scale(loss).backward()
+        scaler.step(optim)
+        scaler.update()
 
         # update tqdm loop
-        loop.set_postfix(loss=loss.item())
-
-
-def dice_loss_accuracy(model,
-                       val_loader,
-                       device="cuda"):
+        if idx%20==0:  
+            loop.set_postfix(loss_20_batches=loss_20_batches.item()/20)
+            loss_20_batches = 0
+        
+        
+def evalution_metrics(model,
+                      val_loader,
+                      loss_fn,
+                      device="cuda"):
     num_correct = 0
     num_pixels = 0
     dice_score = 0
+    loss_epoch = 0
+    
     model.eval()
-
     with torch.no_grad():
         for idx, (image, mask) in enumerate(val_loader):
-            if idx==2:
-                break
             image = image.to(device)
-            mask = mask.to(device)
-            mask_pred = torch.sigmoid(model(image))
-            pred_correct = (mask_pred > 0.5).float()
+            mask = mask.float().unsqueeze(dim=1).to(DEVICE)
+            pred = model(image)
+
+            loss_epoch += loss_fn(pred, mask)
+            mask_pred = torch.sigmoid(pred)
+            mask_pred = (mask_pred > 0.5).float()
+
             num_correct += (mask_pred == mask).sum()
             num_pixels += torch.numel(mask_pred)
             dice_score += (2 * (mask_pred * mask).sum()) / (
                     (mask_pred + mask).sum() + 1e-8
             )
 
-        print(
-            f"Got {num_correct}/{num_pixels} with acc {num_correct / num_pixels * 100:.2f}"
-        )
-        print(f"Dice score: {dice_score / len(val_loader)}")
-        model.train()
+    print(
+        f"Got {num_correct}/{num_pixels} with acc {(num_correct/num_pixels)*100:.2f}\n",
+
+        f"Got valuation_loss of {loss_epoch/len(val_loader):2f}"
+    )
+    print(f"Dice score: {dice_score/len(val_loader)}")
+    
+    model.train()
 
 
 def save_checkpoint(state, folder_path, filename="my_checkpoint.pth.tar"):
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
-    print("=> Saving checkpoint")
-    torch.save(state, os.path.join(folder_path,filename))
+    print("=> Saving checkpoint...")
+    torch.save(state, os.path.join(folder_path, filename))
+    
+    
+def load_model_checkpoint(checkpoint, model):
+    print("=> Loading model checkpoint...")
+    checkpoint = torch.load(checkpoint)
+    model.load_state_dict(checkpoint["state_dict"])    
+    
+def load_optim_checkpoint(checkpoint, optim):
+    print("=> Loading optimizer checkpoint...")
+    checkpoint = torch.load(checkpoint)
+    optim.load_state_dict(checkpoint["optimizer"]) 
 
 
-def save_images(model, loader, folder, epoch, device, num_batches, pad_mirroring):
+def save_images(model, loader, folder, epoch, device, num_images, pad_mirroring):
+    print("=> Saving images...")
 
-    path = os.path.join(folder, f"epoch_{epoch+1}")
+    path = os.path.join(folder, f"epoch_{epoch + 1}")
     if not os.path.exists(path):
         os.makedirs(path)
 
     model.eval()
+    
     with torch.no_grad():
         for idx, (images, masks) in enumerate(loader):
-            if idx < num_batches:
+            if idx < num_images:
                 images = images.to(device)
-                outs = model(images)
+                outs = torch.sigmoid(model(images))
+                outs = (outs > 0.5).float()
                 if pad_mirroring:
                     images = CenterCrop((IMAGE_HEIGHT, IMAGE_WIDTH))(images)
                 # if the batch_size is > 1 we take just the first image/mask
-                for i in range(images.shape[0]):
 
-                    image = images[i]
-                    mask = masks[i]
-                    out = outs[i]
+                # plotting the first image/mask per batch
+                image = images[0]
+                mask = masks[0]
+                out = outs[0]
 
-                    image = tens2image(image)
-                    mask = tens2image(mask)
-                    out = tens2image(out)
+                image = tens2image(image)
+                mask = tens2image(mask)
+                out = tens2image(out)
 
-                    img_gt = overlay_mask(inv_normalize(image), mask)
-                    img_out = overlay_mask(inv_normalize(image), out)
+                img_gt = overlay_mask(inv_normalize(image), mask)
+                img_out = overlay_mask(inv_normalize(image), out)
 
-                    fig = plt.figure(figsize=(10, 7))
-                    rows = 1
-                    columns = 2
+                fig = plt.figure(figsize=(10, 7))
+                rows = 1
+                columns = 2
 
-                    fig.add_subplot(rows, columns, 1)
-                    plt.imshow(img_gt)
-                    plt.axis('off')
-                    plt.title("Input image and ground_truth mask")
+                fig.add_subplot(rows, columns, 1)
+                plt.imshow(img_gt)
+                plt.axis('off')
+                plt.title("Input image and ground_truth mask")
 
-                    fig.add_subplot(rows, columns, 2)
-                    plt.imshow(img_out)
-                    plt.axis('off')
-                    plt.title("Input image and predicted_mask")
+                fig.add_subplot(rows, columns, 2)
+                plt.imshow(img_out)
+                plt.axis('off')
+                plt.title("Input image and predicted_mask")
 
-                    fig.savefig(f'{path}/image_{idx}.png')
+                fig.savefig(f'{path}/image_{idx}.png')
+
+                plt.cla()
+                plt.close(fig)
+                
+            else:
+                break
 
     model.train()
 
@@ -227,4 +263,3 @@ def seed_everything(seed=42):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-

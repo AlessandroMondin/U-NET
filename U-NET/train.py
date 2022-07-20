@@ -1,11 +1,13 @@
 # main source: https://github.com/aladdinpersson/Machine-Learning-Collection/blob/master/ML/Pytorch/image_segmentation/semantic_segmentation_unet/train.py
 import os.path
-
+import torch
 from model import UNET
 from utils import (
     get_loaders,
-    dice_loss_accuracy,
+    evalution_metrics,
     save_checkpoint,
+    load_model_checkpoint,
+    load_optim_checkpoint,
     save_images,
     train_loop
 )
@@ -14,11 +16,12 @@ from config import (
     train_transform,
     val_transforms,
     DEVICE,
-    LOSS_FN,
     LEARNING_RATE,
     EPOCHS,
     PAD_MIRRORING,
-    FOLDER_PATH
+    CHECKPOINT,
+    SAVE_MODEL_PATH,
+    SAVE_IMAGES_PATH
 )
 from torch.optim import Adam
 
@@ -29,37 +32,39 @@ from torch.optim import Adam
 
 
 def main():
-
-    model = UNET(in_channels=3, expansion=64, exit_channels=1)
+    loss_fn = torch.nn.BCEWithLogitsLoss()
+    scaler = torch.cuda.amp.GradScaler()
+    model = UNET(3, 64, 1, padding=0, downhill=4).to(DEVICE)
     optim = Adam(model.parameters(), lr=LEARNING_RATE)
-    train_loader, val_loader = get_loaders(db_root_dir=ROOT_DIR, batch_size=2, train_transform=train_transform,
-                                           val_transform=val_transforms, num_workers=1)
-    for epoch in range(EPOCHS):
+    
+    if CHECKPOINT:
+        load_model_checkpoint(CHECKPOINT, model)
+        load_optim_checkpoint(CHECKPOINT, optim)
+    
+    train_loader, val_loader = get_loaders(db_root_dir=ROOT_DIR, batch_size=8, train_transform=train_transform,
+                                           val_transform=val_transforms, num_workers=4)
+    for epoch in range(10, EPOCHS):
+        
+        print(f"Training epoch {epoch+1}/{EPOCHS}")
 
-        # train_loop(model=model, loader=train_loader, epochs=10, loss_fn=LOSS_FN, optim=optim)
-
-        dice_loss_accuracy(model, val_loader, device=DEVICE)
+        train_loop(model=model, loader=train_loader, loss_fn=loss_fn, optim=optim, scaler=scaler, pos_weight=False)
+        
+        print("Computing dice_loss on val_loader...")
+        
+        evalution_metrics(model, val_loader, loss_fn, device=DEVICE)
 
         checkpoint = {
             "state_dict": model.state_dict(),
             "optimizer": optim.state_dict(),
         }
-        save_checkpoint(checkpoint, folder_path=FOLDER_PATH,
+        
+        save_checkpoint(checkpoint, folder_path=SAVE_MODEL_PATH,
                         filename=f"checkpoint_epoch_{epoch+1}.pth.tar")
 
-        save_images(model=model, loader=val_loader, folder="saved_images",
-                    epoch=epoch, device=DEVICE, num_batches=5, pad_mirroring=PAD_MIRRORING)
+        save_images(model=model, loader=val_loader, folder=SAVE_IMAGES_PATH,
+                    epoch=epoch, device=DEVICE, num_images=10, pad_mirroring=PAD_MIRRORING)
+        
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-

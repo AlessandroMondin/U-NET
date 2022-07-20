@@ -98,49 +98,28 @@ class DAVIS2017(Dataset):
     def __getitem__(self, idx):
         # idx order is controlled by torch.utils.data.DataLoader(shuffle): if shuffle = True, idx will be
         # retrieved randomly, otherwise they will be sequential from 0 to __len__
-        img, gt = self.make_img_gt_pair(idx)
-        # here we're normalizing the mask since the normalization of the mask
-        # inside self.transform (config.py) works only with 3 channels masks of our are 1 channel
+        img = np.array(Image.open(os.path.join(self.db_root_dir, self.img_list[idx])).convert("RGB"), dtype=np.float32)
+        gt = np.array(Image.open(os.path.join(self.db_root_dir, self.labels[idx])).convert("L"), dtype=np.float32)
+
         # aladdin solution
         #gt[gt!=0] = 1
 
         # my less efficient solution: np.bool converts every value != 0 to 1. but since albumentation
         # doesn't accept dtype np.bool we have to convert it back to np.float
+        
         gt = gt.astype(np.bool).astype(np.float32)
+        
         if self.transform is not None:
-            # if image width and height is < than expected shape --> we should apply mirroring:
-            # with padding_mode="reflect"
-            # https://pytorch.org/vision/0.12/generated/torchvision.transforms.Pad.html
 
             augmentations = self.transform(image=img, mask=gt)
             img = augmentations["image"]
             gt = augmentations["mask"]
+            
+        # if image width and height is < than expected shape --> we should apply mirroring:
+        # with padding_mode="reflect"
+        # https://pytorch.org/vision/0.12/generated/torchvision.transforms.Pad.html
         if self.pad_mirroring:
             img = Pad(padding=self.pad_mirroring, padding_mode="reflect")(img)
-
-        return img, gt
-
-    def make_img_gt_pair(self, idx):
-        """
-        Make the image-ground-truth pair
-        """
-        img = np.array(Image.open(os.path.join(self.db_root_dir, self.img_list[idx])).convert("RGB"))
-        label = np.array(Image.open(os.path.join(self.db_root_dir, self.labels[idx])).convert("L"))
-
-        # https://stackoverflow.com/questions/59986353/why-do-i-have-to-convert-uint8-into-float32
-        # converting to float because:
-        # 1) operations within the model will be continuous and will transform the uint8 into floats.
-        # usually these operations are handled internally, however is better to set it explicitly
-        # 2) Data transformation will impact the images themselves and hence casting inputs
-        # as floats should avoid unexpected errors as well
-        # img (0, 255)
-        img = np.array(img, dtype=np.float32)
-        # It seems that if we're using a certain datatype we should be using its operations
-        # otherwise we will/might cause overhead
-        gt = np.array(label, dtype=np.float32)
-        # normalize avoiding 0 division
-        # gt (0, 1)
-        #gt = gt/np.max([gt.max(), 1e-8])
 
         return img, gt
 
