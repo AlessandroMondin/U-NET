@@ -1,12 +1,13 @@
 # main_source https://github.com/kmaninis/OSVOS-PyTorch/blob/master/dataloaders/helpers.py
 
 import os.path
-
+import time
+from sklearn.metrics import recall_score
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
 import cv2
-from torchvision.transforms import CenterCrop
+from torchvision.transforms import CenterCrop, Pad
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from dataset import DAVIS2017
@@ -119,6 +120,7 @@ def get_loaders(
 def train_loop(model, loader, optim, loss_fn, scaler, pos_weight=False):
     loop = tqdm(loader)
     loss_20_batches = 0
+    loss_epoch = 0
     for idx, (image, mask) in enumerate(loop):
         # transferring data to cpu or gpu
         image = image.to(DEVICE)
@@ -131,6 +133,7 @@ def train_loop(model, loader, optim, loss_fn, scaler, pos_weight=False):
                 loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=(mask==0.).sum()/mask.sum())
             loss = loss_fn(out, mask)
             loss_20_batches += loss
+            loss_epoch += loss
 
         # backpropagation
         # check docs here https://pytorch.org/docs/stable/amp.html
@@ -143,7 +146,11 @@ def train_loop(model, loader, optim, loss_fn, scaler, pos_weight=False):
         if idx%20==0:  
             loop.set_postfix(loss_20_batches=loss_20_batches.item()/20)
             loss_20_batches = 0
-        
+            
+    print(
+        f"==> training_loss: {loss_epoch/len(loader):2f}"
+    )            
+      
         
 def evalution_metrics(model,
                       val_loader,
@@ -172,13 +179,34 @@ def evalution_metrics(model,
             )
 
     print(
-        f"Got {num_correct}/{num_pixels} with acc {(num_correct/num_pixels)*100:.2f}\n",
-
-        f"Got valuation_loss of {loss_epoch/len(val_loader):2f}"
+        f"Got {num_correct}/{num_pixels} with acc {(num_correct/num_pixels)*100:.2f}"
     )
-    print(f"Dice score: {dice_score/len(val_loader)}")
+    print(
+        f"==> valuation_loss: {loss_epoch/len(val_loader):2f}"
+    )    
+
+    print(f"==> dice_score: {dice_score/len(val_loader)}")
     
     model.train()
+    
+    
+def validation_recall(model,
+                      val_loader,
+                      device=DEVICE):
+    model.eval()
+    tot_recall = 0
+    with torch.no_grad():
+        for image, mask in val_loader:
+            image = image.to(device)
+            mask = mask.to(device).unsqueeze(dim=1)
+            out = torch.sigmoid(model(image))
+            out = np.array((out>0.5).cpu(), dtype=np.uint8).reshape(1,-1).squeeze()
+            mask = np.array(mask.cpu(), dtype=np.uint8).reshape(1,-1).squeeze()
+            recall_batch = recall_score(mask, out)
+            tot_recall += recall_batch
+    
+    model.train()
+    print(f'Recall on validation set is: {tot_recall/len(val_loader)}')    
 
 
 def save_checkpoint(state, folder_path, filename="my_checkpoint.pth.tar"):
@@ -253,6 +281,39 @@ def save_images(model, loader, folder, epoch, device, num_images, pad_mirroring)
                 break
 
     model.train()
+    
+
+def predict_image(model, image, val_transform, folder, image_title, pad_mirroring):
+    path = os.path.join(folder)
+    if not os.path.exists(path):
+        os.makedirs(path)
+        
+    model.eval()
+    
+    with torch.no_grad():
+        model = model.to(DEVICE)
+        image = val_transform(image=image)["image"].to(DEVICE).unsqueeze(dim=0)
+        if pad_mirroring:
+            image = Pad(padding=pad_mirroring, padding_mode="reflect")(image)
+        start = time.time()
+        mask = torch.sigmoid(model(image))
+        mask = (mask > 0.5).float()
+        end = time.time()
+        print("Inference time is {:2f}".format(end-start))
+
+        if pad_mirroring:
+            image = CenterCrop((IMAGE_HEIGHT, IMAGE_WIDTH))(image)
+        image = tens2image(image)
+        mask = tens2image(mask)
+        pred = overlay_mask(inv_normalize(image), mask)
+
+
+        fig = plt.figure(figsize=(10, 7))
+        plt.imshow(pred)
+        plt.axis('off')
+        plt.title("Test Prediction")
+        
+        fig.savefig(f"{path}/{image_title}.jpg")
 
 
 def seed_everything(seed=42):

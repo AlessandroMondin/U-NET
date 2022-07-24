@@ -30,7 +30,6 @@ class DAVIS2017(Dataset):
             transform: set of Albumentation transformations to be performed with A.Compose
             meanval (tuple): set of magic weights used for normalization (np.subtract(im, meanval))
             seq_name (str): name of a class: i.e. if "bear" one im of "bear" class will be retrieved
-
         """
         self.train = train
         self.db_root_dir = db_root_dir
@@ -38,10 +37,12 @@ class DAVIS2017(Dataset):
         self.seq_name = seq_name
         self.pad_mirroring = pad_mirroring
 
-        if self.train:
+        if self.train==1:
             fname = 'train'
-        else:
+        elif self.train==0:
             fname = 'val'
+        else:
+            fname = "test-dev"
 
         if self.seq_name is None:
 
@@ -84,7 +85,8 @@ class DAVIS2017(Dataset):
             if self.train:
                 img_list = [img_list[0]]
                 labels = [labels[0]]
-
+                
+        print(len(labels), len(img_list))
         assert (len(labels) == len(img_list))
 
         self.img_list = img_list
@@ -100,14 +102,8 @@ class DAVIS2017(Dataset):
         # retrieved randomly, otherwise they will be sequential from 0 to __len__
         img = np.array(Image.open(os.path.join(self.db_root_dir, self.img_list[idx])).convert("RGB"), dtype=np.float32)
         gt = np.array(Image.open(os.path.join(self.db_root_dir, self.labels[idx])).convert("L"), dtype=np.float32)
-
-        # aladdin solution
-        #gt[gt!=0] = 1
-
-        # my less efficient solution: np.bool converts every value != 0 to 1. but since albumentation
-        # doesn't accept dtype np.bool we have to convert it back to np.float
         
-        gt = gt.astype(np.bool).astype(np.float32)
+        gt = ((gt/np.max([gt.max(), 1e-8])) > 0.5).astype(np.float32)
         
         if self.transform is not None:
 
@@ -152,6 +148,3 @@ if __name__ == '__main__':
             break
 
     plt.show(block=True)
-
-
-

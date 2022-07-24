@@ -43,13 +43,13 @@ def main():
     
     train_loader, val_loader = get_loaders(db_root_dir=ROOT_DIR, batch_size=8, train_transform=train_transform,
                                            val_transform=val_transforms, num_workers=4)
-    for epoch in range(10, EPOCHS):
+    for epoch in range(17, EPOCHS):
         
         print(f"Training epoch {epoch+1}/{EPOCHS}")
 
         train_loop(model=model, loader=train_loader, loss_fn=loss_fn, optim=optim, scaler=scaler, pos_weight=False)
         
-        print("Computing dice_loss on val_loader...")
+        print("Computing valuation metrics on val_loader...")
         
         evalution_metrics(model, val_loader, loss_fn, device=DEVICE)
 
