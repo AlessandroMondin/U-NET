@@ -1,10 +1,9 @@
 # https://www.researchgate.net/figure/YOLOv5-architecture-The-YOLO-network-consists-of-three-main-parts-Backbone-Neck-and_fig5_355962110
-
+import time
 import torch
 import torch.nn as nn
 from torchvision.transforms import Resize
-from torch.nn.functional import sigmoid as sigmoid
-import os
+import config
 
 
 # performs a convolution, a batch_norm and then applies a SiLU activation function
@@ -141,20 +140,23 @@ class C3_NECK(nn.Module):
 class HEADS(nn.Module):
     stride = None  # strides computed during build
 
-    def __init__(self, nc=80, anchors=(), ch=(), training=True):  # detection layer
+    def __init__(self, nc=80, anchors=(), ch=(), inference=False):  # detection layer
         super(HEADS, self).__init__()
         self.nc = nc  # number of classes
         self.no = nc + 5  # number of outputs per anchor
         self.nl = len(anchors)  # number of detection layers
-        self.na = len(anchors[0])  # number of anchors
+        self.na = len(anchors[0]) * self.nl  # number of anchors
+        self.naxs = len(anchors[0])
         self.grid = [torch.empty(1)] * self.nl  # init grid
         self.anchor_grid = [torch.empty(1)] * self.nl  # init anchor grid
+
         # https://pytorch.org/docs/stable/generated/torch.nn.Module.html command+f register_buffer
         # has the same result as self.anchors = anchors but, it's a way to register a buffer (make
         # a variable available in runtime) that should not be considered a model parameter
-        self.register_buffer('anchors', torch.tensor(anchors).float().view(self.nl, -1, 2))  # shape(nl,na,2)
-        self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
-        self.training = training
+        self.anchors = torch.tensor(anchors).float().view(self.nl, -1, 2).to(config.DEVICE)  # shape(nl,na,2)
+
+        self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.naxs, 1) for x in ch)  # output conv
+        self.inference = inference
         self.stride = [8, 16, 32]
 
     def forward(self, x):
@@ -165,11 +167,11 @@ class HEADS(nn.Module):
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             # according to https://stackoverflow.com/questions/49643225/whats-the-difference-between-reshape-and-view-in-pytorch
             # view by returns a tensor with a new shape that share the underlying data with the original tensor. In
-            # order not to throw an error however we should use .countguous()
+            # order not to throw an error however we should use .countiguous()
             # to recap, view().contiguous() has the same purpose of reshape but it's more efficient in terms of memory.
-            x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+            x[i] = x[i].view(bs, self.naxs, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
-            if not self.training:  # inference
+            if self.inference:  # inference
                 if self.grid[i].shape[2:4] != x[i].shape[2:4]:
                     self.grid[i], self.anchor_grid[i] = self._make_grid(nx, ny, i)
                 # check anchor's h,w,x,y formula here below:
@@ -185,29 +187,28 @@ class HEADS(nn.Module):
 
                 z.append(y.view(bs, -1, self.no))
 
-        return x if self.training else (torch.cat(z, 1), x)
+        return (torch.cat(z, 1), x) if self.inference else x
 
     def _make_grid(self, nx=20, ny=20, i=0):
         d = self.anchors[i].device
         t = self.anchors[i].dtype
-        shape = 1, self.na, ny, nx, 2  # grid shape
+        shape = 1, self.naxs, ny, nx, 2  # grid shape
         y, x = torch.arange(ny, device=d, dtype=t), torch.arange(nx, device=d, dtype=t)
         # if nx = ny --> yv equals to xv transposed
         yv, xv = torch.meshgrid(y, x, indexing="ij")
         # n.b torch.stack((xv, yv), 2).expand(shape).shape == shape
         # to understand expand --> torch.equal(grid[:,1],grid[:,0])
         grid = torch.stack((xv, yv), 2).expand(shape) - 0.5  # add grid offset, i.e. y = 2.0 * x - 0.5
-        anchor_grid = (self.anchors[i] * self.stride[i]).view((1, self.na, 1, 1, 2)).expand(shape)
+        anchor_grid = self.anchors[i].view((1, self.naxs, 1, 1, 2)).expand(shape)
         return grid, anchor_grid
 
 
 # todos: drop resize class
 class YOLOV5m(nn.Module):
     def __init__(self, first_out, nc=80, anchors=(),
-                 ch=(), training=True):
-
+                 ch=(), inference=False):
         super(YOLOV5m, self).__init__()
-        self.training = training
+        self.inference = inference
         self.backbone = nn.ModuleList()
         self.backbone += [
             CBL(in_channels=3, out_channels=first_out, kernel_size=6, stride=2, padding=2),
@@ -226,20 +227,17 @@ class YOLOV5m(nn.Module):
         self.neck += [
             CBL(in_channels=first_out*16, out_channels=first_out*8, kernel_size=1, stride=1, padding=0),
             C3(in_channels=first_out*16, out_channels=first_out*8, width_multiple=0.25, depth=2, backbone=False),
-            #C3_NECK(in_channels=first_out*16, out_channels=first_out*8, width=0.25, depth=5),
             CBL(in_channels=first_out*8, out_channels=first_out*4, kernel_size=1, stride=1, padding=0),
-            #C3_NECK(in_channels=first_out*8, out_channels=first_out*4, width=0.25, depth=5),
             C3(in_channels=first_out*8, out_channels=first_out*4, width_multiple=0.25, depth=2, backbone=False),
             CBL(in_channels=first_out*4, out_channels=first_out*4, kernel_size=3, stride=2, padding=1),
-            #C3_NECK(in_channels=first_out*8, out_channels=first_out*8, width=0.5, depth=5),
             C3(in_channels=first_out*8, out_channels=first_out*8, width_multiple=0.5, depth=2, backbone=False),
             CBL(in_channels=first_out*8, out_channels=first_out*8, kernel_size=3, stride=2, padding=1),
-            #C3_NECK(in_channels=first_out*16, out_channels=first_out*16, width=0.5, depth=5),
             C3(in_channels=first_out*16, out_channels=first_out*16, width_multiple=0.5, depth=2, backbone=False)
         ]
-        self.head = HEADS(nc=nc, anchors=anchors, ch=ch, training=self.training)
+        self.head = HEADS(nc=nc, anchors=anchors, ch=ch, inference=self.inference)
 
     def forward(self, x):
+        assert x.shape[2] % 32 == 0 and x.shape[3] % 32 == 0, "Width and Height aren't divisible by 32!"
         backbone_connection = []
         neck_connection = []
         outputs = []
@@ -271,35 +269,35 @@ class YOLOV5m(nn.Module):
 
 
 if __name__ == "__main__":
-    batch_size = 4
+    batch_size = 2
     image_height = 640
     image_width = 640
     nc = 80
-    anchors = [[(1.25000, 1.62500), (2.00000, 3.75000), (4.12500, 2.87500)],  # P3/8
-               [(1.87500, 3.81250), (3.87500, 2.81250), (3.68750, 7.43750)],  # P4/16
-               [(3.62500, 2.81250), (4.87500, 6.18750), (11.65625, 10.18750)]]  # P5/32
-
+    anchors = config.ANCHORS
     x = torch.rand(batch_size, 3, image_height, image_width)
     first_out = 48
+
     model = YOLOV5m(first_out=first_out, nc=nc, anchors=anchors,
-                    ch=(first_out*4, first_out*8, first_out*16), training=False)
+                    ch=(first_out*4, first_out*8, first_out*16), inference=False)
 
+    start = time.time()
     out = model(x)
+    end = time.time()
 
-    if getattr(model, "training"):
+    if not getattr(model, "inference"):
         assert out[0].shape == (batch_size, 3, image_height//8, image_width//8, nc + 5)
         assert out[1].shape == (batch_size, 3, image_height//16, image_width//16, nc + 5)
         assert out[2].shape == (batch_size, 3, image_height//32, image_width//32, nc + 5)
 
         print("Success!")
+        print("forward took {:.2f} seconds".format(end-start))
 
-    #save_model(model, "checkpoints", "yolov5m_attempt.pt")
+    """
     print(count_parameters(model))
     check_size(model)
     strip_model(model)
     check_size(model)
-
-    #export_onnx(model)
+    """
 
 
 
