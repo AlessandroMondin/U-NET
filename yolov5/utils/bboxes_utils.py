@@ -1,4 +1,5 @@
 import torch
+import math
 
 # ALADDIN'S
 def iou_width_height(gt_box, anchors):
@@ -82,6 +83,7 @@ def intersection_over_union(boxes_preds, boxes_labels, box_format="midpoint", GI
 # found here: https://gist.github.com/cbernecker/1ac2f9d45f28b6a4902ba651e3d4fa91#file-coco_to_yolo-py
 def coco_to_yolo(bbox, image_w=640, image_h=640):
     x1, y1, w, h = bbox
+    #return [((x1 + w)/2)/image_w, ((y1 + h)/2)/image_h, w/image_w, h/image_h]
     return [((2*x1 + w)/(2*image_w)), ((2*y1 + h)/(2*image_h)), w/image_w, h/image_h]
 
 
@@ -91,10 +93,11 @@ def rescale_bboxes(bboxes, starting_size, ending_size):
     ew, eh = ending_size
     new_boxes = []
     for bbox in bboxes:
-        x = bbox[0] * ew/sw
-        y = bbox[1] * eh/sh
-        w = bbox[2] * ew/sw
-        h = bbox[3] * eh/sh
+        x = math.floor(bbox[0] * ew/sw * 100)/100
+        y = math.floor(bbox[1] * eh/sh * 100)/100
+        w = math.floor(bbox[2] * ew/sw * 100)/100
+        h = math.floor(bbox[3] * eh/sh * 100)/100
+        
         new_boxes.append([x, y, w, h])
     return new_boxes
 

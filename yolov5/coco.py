@@ -1,10 +1,12 @@
 import json
+import os
+
 from tqdm import tqdm
 import pprint
 import csv
 from time import sleep
-
-"""with open("/Users/Alessandro/desktop/ML/DL_DATASETS/COCO/annotations/instances_train2017.json") as f:
+"""
+with open("/Users/Alessandro/desktop/ML/DL_DATASETS/COCO/annotations/instances_train2017.json") as f:
     coco_ann = json.load(f)
 
 coco_parsed = []
@@ -12,7 +14,7 @@ coco_parsed = []
 loop = tqdm(coco_ann["images"])
 
 for idx, image in enumerate(loop):
-    if idx < 128:
+    if idx < 16:
         name = image["file_name"]
         h, w = image["height"], image["width"]
         id = image["id"]
@@ -32,28 +34,35 @@ for idx, image in enumerate(loop):
     else:
         break
 
-path = "/Users/Alessandro/Desktop/ML/DL_DATASETS/COCO/annotations/coco_128.json"
+
+path = "/Users/Alessandro/Desktop/ML/DL_DATASETS/COCO/annotations/coco_16.json"
 
 with open(path, "w") as f:
     json.dump(coco_parsed, f)
 
-path = "/Users/Alessandro/Desktop/ML/DL_DATASETS/COCO/annotations/coco_128.json"
+
+path = "/Users/Alessandro/Desktop/ML/DL_DATASETS/COCO/annotations/coco_2017_val_AM.json"
 with open(path, "r") as f:
     annotations = json.load(f)
-sleep(2)
+
 loop = tqdm(annotations)
+
 for annot in loop:
     img_name = annot["img_name"]
     height = annot["height"]
     width = annot["width"]
+
     with open("/Users/Alessandro/Desktop/ML/DL_DATASETS/COCO/"
-              "annotations/coco_128.csv", "a") as f:
+              "annotations/coco_2017_val_csv.csv", "a+") as f:
         writer = csv.writer(f)
         writer.writerow([img_name, height, width])
         f.close()
 
-    with open("/Users/Alessandro/Desktop/ML/DL_DATASETS/COCO/"
-              "annotations/coco_128_txt/{}.txt".format(img_name[:-4]), "w") as fp:
+    folder_path = "/Users/Alessandro/Desktop/ML/DL_DATASETS/COCO/annotations/coco_2017_val_txt"
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+
+    with open(os.path.join(folder_path,"{}.txt".format(img_name[:-4])), "w") as fp:
 
         boxes = [box["box"]+[box["class"]] for box in annot["bboxes"]]
         for bbox in annot["bboxes"]:
@@ -65,7 +74,8 @@ for annot in loop:
                 h = height if h >= height else h
                 box = [x, y, w, h, bbox["class"]]
                 fp.write(str(box).strip("[]").replace(",","") + "\n")
-        fp.close()"""
+        fp.close()
+"""
 
 # widths = []
 # heights = []

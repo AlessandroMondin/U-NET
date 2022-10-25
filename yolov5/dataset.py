@@ -8,8 +8,9 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from utils.utils import resize_image
 from utils.bboxes_utils import rescale_bboxes, iou_width_height, coco_to_yolo, non_max_suppression as nms
-from utils.plot_utils import plot_image, cells_to_bboxes
+from utils.plot_utils import plot_image, cells_to_bboxes, cells_to_bboxes2
 import config
+from check import plot_coco
 
 
 class MS_COCO_2017(Dataset):
@@ -41,24 +42,23 @@ class MS_COCO_2017(Dataset):
         self.ignore_iou_thresh = 0.5
         self.adaptive_loader = adaptive_loader
         self.default_size = default_size
+        self.root_directory = root_directory
+        self.train = train
 
         if train:
             fname = 'images/train2017'
-            annot_file = "coco_128.csv"
+            annot_file = "coco_2017_train_csv.csv"
             # class instance because it's used in the __getitem__
-            self.annot_folder = "coco_128_txt"
+            self.annot_folder = "coco_2017_train_txt"
         else:
             fname = 'images/val2017'
-            annot_file = "coco_128.csv"
+            annot_file = "coco_2017_val_csv.csv"
             # class instance because it's used in the __getitem__
-            self.annot_folder = "coco_128_txt"
+            self.annot_folder = "coco_2017_val_txt"
 
         self.fname = fname
 
-        # with open(os.path.join(root_directory, "annotations", annot_file), "r") as f:
-        #    self.annotations = json.load(f)
-
-        self.annotations = pd.read_csv(os.path.join(config.ROOT_DIR, "annotations", annot_file))
+        self.annotations = pd.read_csv(os.path.join(root_directory, "annotations", annot_file), header=None)
 
         if adaptive_loader:
             self.annotations = self.adaptive_shape(self.annotations, bs)
@@ -76,17 +76,20 @@ class MS_COCO_2017(Dataset):
         # to avoid an annoying "UserWarning: loadtxt: Empty input file"
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            bboxes = np.loadtxt(fname=label_path, delimiter=" ", ndmin=2).tolist()
+            annotations = np.loadtxt(fname=label_path, delimiter=" ", ndmin=2).tolist()
 
         img = np.array(Image.open(os.path.join(config.ROOT_DIR, self.fname, img_name)).convert("RGB"))
 
         if self.adaptive_loader:
+            bboxes = [ann[:-1] for ann in annotations]
+            classes = [ann[-1] for ann in annotations]
             sh, sw = img.shape[0:2]
             img = resize_image(img, (w, h))
             bboxes = rescale_bboxes(bboxes, [sw, sh], [w, h])
+            bboxes = [list(bboxes[i]) + [classes[i]] for i in range(len(bboxes))]
 
         if self.transform:
-            augmentations = self.transform(image=img, bboxes=bboxes)
+            augmentations = self.transform(image=img, bboxes=bboxes if self.adaptive_loader else annotations)
             img = augmentations["image"]
             bboxes = augmentations["bboxes"]
 
@@ -100,24 +103,42 @@ class MS_COCO_2017(Dataset):
     # original ratio of images
 
     def adaptive_shape(self, annotations, batch_size):
-        annotations = sorted(annotations, key=lambda x: (x["width"], x["height"]))
-        # IMPLEMENT POINT 2 OF WORD DOCUMENT
-        for i in range(0, len(annotations), batch_size):
-            size = [annotations[i]["width"], annotations[i]["height"]]  # [width, height]
-            max_dim = max(size)
-            max_idx = size.index(max_dim)
-            sz = random.randrange(int(self.default_size * 0.7), int(self.default_size * 1.3)) // 32 * 32
-            size[~max_idx] = (((size[~max_idx] / size[max_idx]) * sz) // 32) * 32
-            size[max_idx] = sz
-            if i + batch_size <= len(annotations):
-                bs = batch_size
-            else:
-                bs = len(annotations) - i
-            for idx in range(bs):
-                annotations[i + idx]["width"] = int(size[0])
-                annotations[i + idx]["height"] = int(size[1])
 
-        return annotations
+        name = "train" if self.train else "val"
+        path = os.path.join(
+            self.root_directory, "annotations",
+            "adaptive_ann_{}_bs_{}.csv".format(name, int(batch_size))
+        )
+
+        if os.path.isfile(path):
+            print("==> Loading cached annotations for adaptive loader")
+            parsed_annot = pd.read_csv(path, index_col=0)
+        else:
+            annotations.sort_values([1, 2], ascending=True, inplace=True)
+            # IMPLEMENT POINT 2 OF WORD DOCUMENT
+            for i in range(0, len(annotations), batch_size):
+                size = [annotations.iloc[i, 2], annotations.iloc[i, 1]]  # [width, height]
+                max_dim = max(size)
+                max_idx = size.index(max_dim)
+                size[~max_idx] += 32
+                sz = random.randrange(int(self.default_size * 0.7), int(self.default_size * 1.3)) // 32 * 32
+                size[~max_idx] = ((sz/size[max_idx])*(size[~max_idx]) // 32) * 32
+                size[max_idx] = sz
+                if i + batch_size <= len(annotations):
+                    bs = batch_size
+                else:
+                    bs = len(annotations) - i
+                for idx in range(bs):
+                    annotations.iloc[i + idx, 2] = size[0]
+                    annotations.iloc[i + idx, 1] = size[1]
+
+                # sample annotation to avoid having pseudo-equal images in the same batch
+                annotations.iloc[i:idx, :] = annotations.iloc[i:idx, :].sample(frac=1, axis=0)
+
+            parsed_annot = pd.DataFrame(annotations)
+            parsed_annot.to_csv(path)
+
+        return parsed_annot
 
     @staticmethod
     def collate_fn(batch):
@@ -153,21 +174,23 @@ class MS_COCO_2017_VALIDATION(Dataset):
         self.ignore_iou_thresh = 0.5
         self.adaptive_loader = adaptive_loader
         self.default_size = default_size
+        self.root_directory = root_directory
+        self.train = train
 
         if train:
             fname = 'images/train2017'
-            annot_file = "coco_128.csv"
+            annot_file = "coco_2017_train_csv.csv"
             # class instance because it's used in the __getitem__
-            self.annot_folder = "coco_128_txt"
+            self.annot_folder = "coco_2017_train_txt"
         else:
             fname = 'images/val2017'
-            annot_file = "coco_128.csv"
+            annot_file = "coco_2017_val_csv.csv"
             # class instance because it's used in the __getitem__
-            self.annot_folder = "coco_128_txt"
+            self.annot_folder = "coco_2017_val_txt"
 
         self.fname = fname
 
-        self.annotations = pd.read_csv(os.path.join(config.ROOT_DIR, "annotations", annot_file))
+        self.annotations = pd.read_csv(os.path.join(root_directory, "annotations", annot_file), header=None)
 
         if adaptive_loader:
             self.annotations = self.adaptive_shape(self.annotations, bs)
@@ -178,9 +201,11 @@ class MS_COCO_2017_VALIDATION(Dataset):
     def __getitem__(self, idx):
 
         img_name = self.annotations.iloc[idx, 0]
+        print(img_name)
 
-        gt_height = self.annotations.iloc[idx, 1]
-        gt_width = self.annotations.iloc[idx, 2]
+        tg_height = self.annotations.iloc[idx, 1] if self.adaptive_loader else 640
+        tg_width = self.annotations.iloc[idx, 2] if self.adaptive_loader else 640
+        # print(f'image_name: {img_name}, idx: {idx}, tg_height: {tg_height}, tg_width: {tg_width}')
         # img_name[:-4] to remove the .jpg or .png which are coco img formats
         label_path = os.path.join(os.path.join(config.ROOT_DIR, "annotations", self.annot_folder, img_name[:-4] + ".txt"))
         with warnings.catch_warnings():
@@ -194,13 +219,18 @@ class MS_COCO_2017_VALIDATION(Dataset):
 
         if self.adaptive_loader:
             sh, sw = img.shape[0:2]
-            img = resize_image(img, (gt_width, gt_height))
-            bboxes = rescale_bboxes(bboxes, [sw, sh], [gt_width, gt_height])
+            # print(f'starting_height: {sh}, starting_width: {sw}')
+            bboxes = rescale_bboxes(bboxes, [sw, sh], [tg_width, tg_height])
+            img = resize_image(img, (tg_width, tg_height))
+
+        # annot_bboxes = [[classes[i]-1]+[1]+list(bboxes[i]) for i in range(len(bboxes))]
+        # plot_coco(img, annot_bboxes)
 
         if self.transform:
             augmentations = self.transform(image=img, bboxes=bboxes)
             img = augmentations["image"]
             bboxes = augmentations["bboxes"]
+
 
         # Below assumes 3 scale predictions (as paper) and same num of anchors per scale
         # 6 because (p_o, x, y, w, h, class)
@@ -209,7 +239,7 @@ class MS_COCO_2017_VALIDATION(Dataset):
         targets = [torch.zeros((self.num_anchors // 3, int(img.shape[1]/S), int(img.shape[2]/S), 6)) for S in self.S]
         for idx, box in enumerate(bboxes):
             class_label = classes[idx] - 1  # classes in coco start from 1
-            box = coco_to_yolo(box)
+            box = coco_to_yolo(box, image_w=tg_width, image_h=tg_height)
             # this iou() computer iou just by comparing widths and heights
             # torch.tensor(box[2:4] -> shape (2,) - self.anchors shape -> (9,2)
             # iou_anchors --> tensor of shape (9,)
@@ -232,9 +262,12 @@ class MS_COCO_2017_VALIDATION(Dataset):
                 # found via index in the line below
                 anchor_on_scale = anchor_idx % self.num_anchors_per_scale
                 # slice anchors based on the idx of the best scales of anchors
-                S = self.S[scale_idx]
-                scale_x = int(img.shape[2]/S)
-                scale_y = int(img.shape[1]/S)
+
+                scale_y = targets[scale_idx].shape[1]
+                scale_x = targets[scale_idx].shape[2]
+                # S = self.S[scale_idx]
+                # scale_y = int(img.shape[1]/S)
+                # scale_x = int(img.shape[2]/S)
 
                 # another problem: in the labels the coordinates of the objects are set
                 # with respect to the whole image, while we need them wrt the corresponding (?) cell
@@ -290,24 +323,42 @@ class MS_COCO_2017_VALIDATION(Dataset):
     # original ratio of images
 
     def adaptive_shape(self, annotations, batch_size):
-        annotations = sorted(annotations, key=lambda x: (x["width"], x["height"]))
-        # IMPLEMENT POINT 2 OF WORD DOCUMENT
-        for i in range(0, len(annotations), batch_size):
-            size = [annotations[i]["width"], annotations[i]["height"]]  # [width, height]
-            max_dim = max(size)
-            max_idx = size.index(max_dim)
-            sz = random.randrange(int(self.default_size * 0.7), int(self.default_size * 1.3)) // 32 * 32
-            size[~max_idx] = (((size[~max_idx] / size[max_idx]) * sz) // 32) * 32
-            size[max_idx] = sz
-            if i + batch_size <= len(annotations):
-                bs = batch_size
-            else:
-                bs = len(annotations) - i
-            for idx in range(bs):
-                annotations[i + idx]["width"] = int(size[0])
-                annotations[i + idx]["height"] = int(size[1])
 
-        return annotations
+        name = "train" if self.train else "val"
+        path = os.path.join(
+            self.root_directory, "annotations",
+            "adaptive_ann_{}_bs_{}.csv".format(name, int(batch_size))
+        )
+
+        if os.path.isfile(path):
+            print("==> Loading cached annotations for adaptive loader")
+            parsed_annot = pd.read_csv(path, index_col=0)
+        else:
+            annotations.sort_values([1, 2], ascending=True, inplace=True)
+            # IMPLEMENT POINT 2 OF WORD DOCUMENT
+            for i in range(0, len(annotations), batch_size):
+                size = [annotations.iloc[i, 2], annotations.iloc[i, 1]]  # [width, height]
+                max_dim = max(size)
+                max_idx = size.index(max_dim)
+                size[~max_idx] += 32
+                sz = random.randrange(int(self.default_size * 0.7), int(self.default_size * 1.3)) // 32 * 32
+                size[~max_idx] = ((sz/size[max_idx])*(size[~max_idx]) // 32) * 32
+                size[max_idx] = sz
+                if i + batch_size <= len(annotations):
+                    bs = batch_size
+                else:
+                    bs = len(annotations) - i
+                for idx in range(bs):
+                    annotations.iloc[i + idx, 2] = size[0]
+                    annotations.iloc[i + idx, 1] = size[1]
+
+                # sample annotation to avoid having pseudo-equal images in the same batch
+                annotations.iloc[i:idx, :] = annotations.iloc[i:idx, :].sample(frac=1, axis=0)
+
+            parsed_annot = pd.DataFrame(annotations)
+            parsed_annot.to_csv(path)
+
+        return parsed_annot
 
     @staticmethod
     def collate_fn(batch):
@@ -323,47 +374,24 @@ if __name__ == "__main__":
     transform = config.VAL_TRANSFORM
 
     dataset = MS_COCO_2017_VALIDATION(num_classes=len(config.COCO_LABELS), anchors=config.ANCHORS,
-                                      root_directory=config.ROOT_DIR, transform=config.TRAIN_TRANSFORMS, train=True, S=S)
-
-    """scaled_anchors = torch.tensor(anchors) / (
-            1 / torch.tensor(S).unsqueeze(1).unsqueeze(1).repeat(1, 3, 2)
-    )"""
+                                      root_directory=config.ROOT_DIR, transform=config.ADAPTIVE_VAL_TRANSFORM,
+                                      train=True, S=S, adaptive_loader=True, default_size=640, bs=64)
 
     anchors = torch.tensor(anchors)
-    loader = DataLoader(dataset=dataset, batch_size=2, shuffle=False)
-    shape = 640
-    S = [8, 16, 32]
-    S = [640/i for i in S]
-    for x, y in loader:
-        boxes = []
+    loader = DataLoader(dataset=dataset, batch_size=8, shuffle=False)
 
+    for x, y in loader:
+
+        boxes = []
+        boxes2 = cells_to_bboxes2(y, anchors, S)
+        """
         for i in range(y[0].shape[1]):
             anchor = anchors[i]
 
             boxes += cells_to_bboxes(
                 y[i], is_preds=False, S=y[i].shape[2], anchors=anchor
-            )[0]
-        boxes = nms(boxes, iou_threshold=1, threshold=0.7, box_format="midpoint")
+            )[0]"""
 
-        plot_image(x[0].permute(1, 2, 0).to("cpu"), boxes)
+        boxes = nms(boxes2, iou_threshold=1, threshold=0.7, box_format="midpoint")
 
-    """
-    bs = 4
-    S = [8, 16, 32]
-
-    dataset = MS_COCO_2017(num_classes=80, anchors=ANCHORS, root_directory=ROOT_DIR,
-                           transform=VAL_TRANSFORM, train=True, S=S)
-
-    loader = DataLoader(dataset, batch_size=bs, collate_fn=dataset.collate_fn, num_workers=0, shuffle=False)
-
-    hw = {}
-    loop = tqdm(loader)
-
-    for images, y, _ in loop:
-        images = torch.stack(images, dim=0)
-        if tuple(images.shape[2:4]) not in hw.keys():
-            hw[tuple(images.shape[2:4])] = 1
-        else:
-            hw[tuple(images.shape[2:4])] += 1
-    
-    """
+        plot_image(x[0].permute(1, 2, 0).to("cpu"), boxes, cell_to_bboxes1=False)

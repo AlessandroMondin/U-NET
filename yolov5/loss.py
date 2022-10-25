@@ -12,7 +12,7 @@ from utils.bboxes_utils import (
     intersection_over_union,
     non_max_suppression as nms
 )
-from utils.plot_utils import cells_to_bboxes, plot_image
+from utils.plot_utils import cells_to_bboxes, plot_image, cells_to_bboxes2
 import config
 from model import YOLOV5m
 from dataset import MS_COCO_2017
@@ -40,17 +40,18 @@ class FocalLoss(nn.Module):
 
 
 class YOLO_LOSS:
-    def __init__(self, model, save_logs=False):
+    def __init__(self, model, adaptive_loader, save_logs=False):
 
+        self.adaptive_loader = adaptive_loader
         self.mse = nn.MSELoss()
-        self.bce = nn.BCEWithLogitsLoss()
-        self.entropy = nn.CrossEntropyLoss()
+        self.BCE_cls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(config.CLS_PW))
+        self.BCE_obs = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(config.OBJ_PW))
+
         self.sigmoid = nn.Sigmoid()
 
-        self.lambda_class = 1
-        self.lambda_noobj = 1
+        self.lambda_class = 0.5
         self.lambda_obj = 1
-        self.lambda_box = 10
+        self.lambda_box = 0.05
 
         anchors = getattr(model.head, "anchors").clone().detach()
         self.anchors = torch.cat((anchors[0], anchors[1], anchors[2]), dim=0)
@@ -66,16 +67,16 @@ class YOLO_LOSS:
         if self.save_logs:
             with open(os.path.join("train_eval_metrics", "training_logs", "loss.csv"), "w") as f:
                 writer = csv.writer(f)
-                writer.writerow(["epoch", "batch_idx", "box_loss", "object_loss",
-                                 "no_object_loss", "class_loss"])
-
-                print("..Created loss.csv, it will be updated during training..")
+                writer.writerow(["epoch", "batch_idx", "box_loss", "object_loss", "class_loss"])
+                print("--------------------------------------------------------------------------------------")
+                print("Created loss.csv in /train_eval_logs/training_logs, it will be updated during training..")
+                print("--------------------------------------------------------------------------------------")
                 f.close()
 
-    def __call__(self, preds, targets, pred_size, batch_idx=None, epoch=None, save_logs=False):
+    def __call__(self, preds, targets, pred_size, batch_idx=None, epoch=None):
         self.batch_idx = batch_idx
         self.epoch = epoch
-        self.save_logs = save_logs
+
         # list of lists --> [pred[0].height, pred[0].width, pred[1].height... etc]
 
         targets = [self.build_targets(preds, bboxes, pred_size) for bboxes in targets]
@@ -86,15 +87,33 @@ class YOLO_LOSS:
 
         anchors = self.anchors.reshape(3, 3, 2).to(config.DEVICE)
 
-        loss = (self.compute_loss(preds[0], t1, anchors=anchors[0])
+        if self.save_logs:
+            l1, logs1 = self.compute_loss(preds[0], t1, anchors=anchors[0])
+            l2, logs2 = self.compute_loss(preds[1], t2, anchors=anchors[1])
+            l3, logs3 = self.compute_loss(preds[2], t3, anchors=anchors[2])
+            loss = l1 + l2 + l3
+
+            freq = 10
+            if self.batch_idx % freq == 0:
+                log_losses = torch.mean(torch.cat([logs1, logs2, logs3], dim=0), dim=0)
+                with open(os.path.join("train_eval_metrics", "training_logs", "loss.csv"), "a") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([self.epoch, self.batch_idx, log_losses[0].item(), log_losses[1].item(),
+                                     log_losses[2].item(), log_losses[3].item()])
+
+                    f.close()
+
+        else:
+            loss = (
+                self.compute_loss(preds[0], t1, anchors=anchors[0])
                 + self.compute_loss(preds[1], t2, anchors=anchors[1])
-                + self.compute_loss(preds[2], t3, anchors=anchors[2]))
+                + self.compute_loss(preds[2], t3, anchors=anchors[2])
+            )
 
         return loss
 
     def build_targets(self, input_tensor, bboxes, pred_size):
-
-        check_loss = True
+        check_loss = False
         if check_loss:
             ph = pred_size[0]
             pw = pred_size[1]
@@ -111,16 +130,17 @@ class YOLO_LOSS:
             targets = [torch.zeros((self.num_anchors_per_scale, int(input_tensor.shape[2]/S),
                                     int(input_tensor.shape[3]/S), 6)) for S in self.S]
 
-        classes = [box[-1]-1 for box in bboxes]  # classes in coco start from 1
+        classes = [box[-1] for box in bboxes]
         bboxes = [box[:-1] for box in bboxes]
-        if check_loss:
-            bboxes = rescale_bboxes(bboxes, starting_size=(640, 640), ending_size=(pw, ph))
-        else:
-            bboxes = rescale_bboxes(bboxes, starting_size=(640, 640),
-                                    ending_size=(pw, ph))
+
+        if not self.adaptive_loader:
+            if check_loss:
+                bboxes = rescale_bboxes(bboxes, starting_size=(640, 640), ending_size=(pw, ph))
+            else:
+                bboxes = rescale_bboxes(bboxes, starting_size=(640, 640), ending_size=(pw, ph))
 
         for idx, box in enumerate(bboxes):
-            class_label = classes[idx]
+            class_label = classes[idx] - 1  # classes in coco start from 1
             box = coco_to_yolo(box, pw, ph)
 
             iou_anchors = iou_width_height(torch.tensor(box[2:4]), self.anchors/torch.tensor([640, 640]).to(config.DEVICE))
@@ -142,12 +162,13 @@ class YOLO_LOSS:
                 anchor_on_scale = anchor_idx % self.num_anchors_per_scale
                 # slice anchors based on the idx of the best scales of anchors
                 if check_loss:
-                    scale_x = input_tensor[int(scale_idx)].shape[2]
-                    scale_y = input_tensor[int(scale_idx)].shape[3]
+                    scale_y = input_tensor[int(scale_idx)].shape[2]
+                    scale_x = input_tensor[int(scale_idx)].shape[3]
                 else:
                     S = self.S[scale_idx]
-                    scale_x = int(input_tensor.shape[3] / S)
                     scale_y = int(input_tensor.shape[2] / S)
+                    scale_x = int(input_tensor.shape[3] / S)
+
                 # S = self.S[int(scale_idx)]
                 # another problem: in the labels the coordinates of the objects are set
                 # with respect to the whole image, while we need them wrt the corresponding (?) cell
@@ -199,86 +220,58 @@ class YOLO_LOSS:
     def compute_loss(self, preds, targets, anchors):
 
         # originally anchors have shape (3,2) --> 3 set of anchors of width and height
+        bs = preds.shape[0]
         anchors = anchors.reshape(1, 3, 1, 1, 2)
 
-        # because of https://github.com/ultralytics/yolov5/issues/471
-        xy = preds[..., 1:3].sigmoid() * 2 - 0.5
-        wh = (preds[..., 3:5].sigmoid() * 2) ** 2 * anchors
-
-        # Check where obj and noobj (we ignore if target == -1)
-        obj = targets[..., 0] == 1  # in paper this is Iobj_i
-        noobj = targets[..., 0] == 0  # in paper this is Inoobj_i
+        pxy = (preds[..., 1:3].sigmoid() * 2) - 0.5
+        pwh = ((preds[..., 3:5].sigmoid() * 2) ** 2) * anchors
+        pbox = torch.cat((pxy, pwh), dim=-1)
+        tbox = targets[..., 1:5]
 
         # ======================= #
-        #   FOR NO OBJECT LOSS    #
+        #   FOR OBJECTNESS SCORE    #
         # ======================= #
 
-        # not doing sigmoid because self.bce is bce_with_logits
-        no_object_loss = self.bce(
-            # [..., 0:1] instead of [..., 0] to keep shape untouched
-            (preds[..., 0:1][noobj]), (targets[..., 0:1][noobj]),
-        )
-
-        # ==================== #
-        #   FOR OBJECT LOSS    #
-        # ==================== #
-        # https://www.youtube.com/watch?v=Grir6TZbc1M&t=5668s
-        # explanation of anchors at 12:17:
-        # dim=-1 means the last dim
-        box_preds = torch.cat([xy, wh], dim=-1)
-        ious = intersection_over_union(box_preds, targets[..., 1:5], GIoU=True).detach()
-        # mse or bce??
-        object_loss = self.bce(self.sigmoid(preds[..., 0:1][obj]), ious[obj] * targets[..., 0:1][obj])
+        lobj = self.BCE_obs(preds[..., 0:1], targets[..., 0:1])
 
         # ======================== #
         #   FOR BOX COORDINATES    #
         # ======================== #
 
-        # preds[..., 1:3] = self.sigmoid(preds[..., 1:3])   # x,y coordinates
-        # targets[..., 3:5] = ((targets[..., 3:5]/2)**(1/2))/anchors
-        # width, height coordinates
-        # box_loss = self.mse(preds[..., 1:5][obj], targets[..., 1:5][obj])
-
-        box_loss = (1 - ious[obj]).mean()
+        iou = intersection_over_union(pbox, tbox, GIoU=True).squeeze()  # iou(prediction, target)
+        lbox = (1.0 - iou).mean()  # iou loss
 
         # ================== #
         #   FOR CLASS LOSS   #
         # ================== #
-
-        class_loss = self.entropy(
-            (preds[..., 5:][obj]), (targets[..., 5][obj].long()),
-        )
-
-        if self.save_logs:
-            freq = 10
-            if self.batch_idx % freq == 0:
-                box_loss = self.lambda_box * box_loss
-                object_loss = self.lambda_obj * object_loss
-                no_object_loss = self.lambda_noobj * no_object_loss
-                class_loss = self.lambda_class * class_loss
-
-                with open(os.path.join("train_eval_metrics", "training_logs", "loss.csv"), "a") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([self.epoch, self.batch_idx, box_loss.item(), object_loss.item(),
-                                    no_object_loss.item(), class_loss.item()])
-
-                    f.close()
+        # NB: my targets[...,5:6]) is a vector of size bs, 1,
+        # ultralytics targets[...,5:6]) is a matrix of shape bs, num_classes
+        lcsl = self.BCE_cls(preds[..., 5:6], targets[..., 5:6])  # BCE
 
         return (
-            self.lambda_box * box_loss
-            + self.lambda_obj * object_loss
-            + self.lambda_noobj * no_object_loss
-            + self.lambda_class * class_loss
+            (self.lambda_box * lbox
+             + self.lambda_obj * lobj
+             + self.lambda_class * lcsl) * bs,
+
+            torch.unsqueeze(
+                torch.stack([
+                    self.lambda_box * lbox,
+                    self.lambda_obj * lobj,
+                    self.lambda_class * lcsl
+                ]), dim=0
+            )
+
+            if self.save_logs else None
         )
 
 
 if __name__ == "__main__":
     check_loss = False
-
     batch_size = 8
     image_height = 640
     image_width = 640
     nc = 91
+    S = [8, 16, 32]
 
     anchors = config.ANCHORS
     first_out = 48
@@ -286,16 +279,22 @@ if __name__ == "__main__":
     model = YOLOV5m(first_out=first_out, nc=nc, anchors=anchors,
                     ch=(first_out*4, first_out*8, first_out*16), inference=False).to(config.DEVICE)
 
-    yolo_loss = YOLO_LOSS(model)
+    dataset = MS_COCO_2017(num_classes=len(config.COCO_LABELS), anchors=config.ANCHORS,
+                           root_directory=config.ROOT_DIR, transform=config.ADAPTIVE_VAL_TRANSFORM,
+                           train=True, S=S, adaptive_loader=True, default_size=640, bs=8)
 
-    dataset = MS_COCO_2017(root_directory=config.ROOT_DIR, train=True, num_classes=nc,
-                           anchors=anchors, transform=config.TRAIN_TRANSFORMS)
+    anchors = torch.tensor(anchors)
 
-    loader = DataLoader(dataset=dataset, batch_size=2, shuffle=False, collate_fn=dataset.collate_fn)
+    yolo_loss = YOLO_LOSS(model, adaptive_loader=dataset.adaptive_loader)
+
+    loader = DataLoader(dataset=dataset, batch_size=4, shuffle=False, collate_fn=dataset.collate_fn)
 
     if check_loss:
         for images, bboxes in loader:
-            images = multi_scale(images, target_shape=640, max_stride=32).to(config.DEVICE)
+            images = torch.stack(images, dim=0)
+            if not dataset.adaptive_loader:
+                images = multi_scale(images, target_shape=640, max_stride=32).to(config.DEVICE)
+
             preds = model(images)
             start = time.time()
             loss = yolo_loss(preds, bboxes, pred_size=images.shape[2:4])
@@ -305,18 +304,18 @@ if __name__ == "__main__":
 
     else:
         for images, bboxes in loader:
-            images = multi_scale(images, target_shape=640, max_stride=32).to(config.DEVICE)
+            images = torch.stack(images, dim=0)
+            if not dataset.adaptive_loader:
+                images = multi_scale(images, target_shape=640, max_stride=32).to(config.DEVICE)
+
             images = torch.unsqueeze(images[0], dim=0)  # keep just the first img but preserving bs
             bboxes = bboxes[0]
-            targets = yolo_loss.build_targets(images, bboxes, images.shape[2:4])
+            targets = yolo_loss.build_targets(images, bboxes, images[0].shape[2:4])
             boxes = []
+            S = [8, 16, 32]
+            targets = [torch.unsqueeze(target, dim=0) for target in targets]
 
-            for i in range(targets[0].shape[0]):
-                anchor = anchors[i]
-
-                boxes += cells_to_bboxes(
-                    torch.unsqueeze(targets[i], dim=0), is_preds=False, S=targets[i].shape[2], anchors=anchor
-                )[0]
+            boxes = cells_to_bboxes2(targets, anchors, S)
             boxes = nms(boxes, iou_threshold=1, threshold=0.7, box_format="midpoint")
 
-            plot_image(images[0].permute(1, 2, 0).to("cpu"), boxes)
+            plot_image(images[0].permute(1, 2, 0).to("cpu"), boxes, cell_to_bboxes1=False)

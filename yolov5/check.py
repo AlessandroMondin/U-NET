@@ -1,36 +1,107 @@
-# checking that all the images & labels are being loaded without triggering errors
-
-from dataset import MS_COCO_2017, MS_COCO_2017_VALIDATION
-from torch.utils.data import DataLoader
+import torch
+from utils.utils import check_size, count_parameters
+import os
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from model import YOLOV5m
 import config
-from tqdm import tqdm
-from time import sleep
+from PIL import Image
+import numpy as np
+import cv2
+from utils.plot_utils import plot_image
+from utils.utils import resize_image
+from utils.bboxes_utils import rescale_bboxes, coco_to_yolo
+
+def plot_coco(image, boxes):
+    """Plots predicted bounding boxes on the image"""
+    cmap = plt.get_cmap("tab20b")
+    class_labels = config.COCO_LABELS
+    colors = [cmap(i) for i in np.linspace(0, 1, len(class_labels))]
+    im = np.array(image)
+
+    # Create figure and axes
+    fig, ax = plt.subplots(1)
+    # Display the image
+    ax.imshow(im)
+
+    # box[0] is x midpoint, box[2] is width
+    # box[1] is y midpoint, box[3] is height
+
+    # Create a Rectangle patch
+    for box in boxes:
+        assert len(box) == 6, "box should contain class pred, confidence, x, y, width, height"
+        class_pred = box[0]
+        box = box[2:]
+
+        rect = patches.Rectangle(
+            (box[0], box[1]),
+            box[2],
+            box[3],
+            linewidth=2,
+            edgecolor=colors[int(class_pred)],
+            facecolor="none",
+        )
+        # Add the patch to the Axes
+        ax.add_patch(rect)
+        plt.text(
+            box[0],
+            box[1],
+            s=class_labels[int(class_pred)],
+            color="white",
+            verticalalignment="top",
+            bbox={"color": colors[int(class_pred)], "pad": 0},
+        )
+    plt.show()
+
 
 if __name__ == "__main__":
-    S = [8, 16, 32]
-    training = [True, False]
-    for train in training:
 
-        transform = config.TRAIN_TRANSFORMS if train else config.VAL_TRANSFORM
+    """anchors = torch.tensor(config.ANCHORS)
+    first_out = 48
 
-        dataset_train = MS_COCO_2017(num_classes=len(config.COCO_LABELS), anchors=config.ANCHORS, root_directory=config.ROOT_DIR,
-                                     transform=config.VAL_TRANSFORM, train=train, S=S)
+    model = YOLOV5m(first_out=first_out, nc=80, anchors=config.ANCHORS,
+                    ch=(first_out*4, first_out*8, first_out*16), inference=False)
 
-        dataset_val = MS_COCO_2017_VALIDATION(num_classes=len(config.COCO_LABELS), anchors=config.ANCHORS,
-                                              root_directory=config.ROOT_DIR, transform=config.VAL_TRANSFORM,
-                                              train=train, S=S)
+    weights_path = os.path.join("ultralytics_files", "yolov5m.pt")
 
-        loader_train = DataLoader(dataset_train, batch_size=8, collate_fn=dataset_train.collate_fn, num_workers=0, shuffle=False)
-        loader_val = DataLoader(dataset=dataset_val, batch_size=8, shuffle=True)
+    ordered_dict = torch.load(weights_path, map_location="cpu")
 
-        train_loop = tqdm(loader_train)
+    count_parameters(model)
 
-        for idx, (images, labels, _) in enumerate(train_loop):
-            if idx > 100:
-                break
-        print("Success on training dataset with train_transform == {}".format(train))
-        sleep(1)
-        val_loop = tqdm(loader_val)
-        for images, labels in val_loop:
-            a = 1
-        print("Success on val dataset with train_transform == {}".format(train))
+    check_size(model)
+
+    print("Check and compare these metrics with YOLOV5M of Ultralytics")"""
+
+    img = np.array(Image.open(os.path.join(config.ROOT_DIR, "images","train2017", "000000124516.jpg")).convert("RGB"))
+    label_path = os.path.join(os.path.join(config.ROOT_DIR, "annotations", "coco_2017_train_txt", "000000124516" + ".txt"))
+    annotations = np.loadtxt(fname=label_path, delimiter=" ", ndmin=2).tolist()
+    bboxes = [ann[:-1] for ann in annotations]
+    classes = [ann[-1] for ann in annotations]
+
+    annot_bboxes = [[classes[i]-1]+[1]+bboxes[i] for i in range(len(bboxes))]
+
+    plot_coco(img, annot_bboxes)
+
+    new_shape = [480, 96]
+
+    # params: rescale_bboxes(bboxes, [starting_width, starting_height], [ending_width, ending_height])
+    bboxes = rescale_bboxes(bboxes, list(img.shape[0:2])[::-1], new_shape)
+
+    """yolo_bboxes = []
+    for box in bboxes:
+        box = coco_to_yolo(box, image_w=new_shape[0], image_h=new_shape[1])
+        for i,coord in enumerate(box):
+            if i%2==0:
+                box[i] *= new_shape[0]
+            else:
+                box[i] *= new_shape[1]
+
+        yolo_bboxes.append(box)"""
+
+    img = resize_image(img, new_shape)
+
+    annot_bboxes = [[classes[i]-1] + [1] + bboxes[i] for i in range(len(bboxes))]
+
+    plot_coco(img, annot_bboxes)
+
+

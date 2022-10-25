@@ -11,8 +11,6 @@ from dataset import MS_COCO_2017, MS_COCO_2017_VALIDATION
 
 def multi_scale(img, target_shape, max_stride):
     # to make it work with collate_fn of the loader
-    if isinstance(img, tuple) or isinstance(img, list):
-        img = torch.stack(list(img), dim=0)
     # returns a random number between target_shape*0.5 e target_shape*1.5+max_stride, applies an integer
     # division by max stride and multiplies again for max_stride
     # in other words it returns a number between those two interval divisible by 32
@@ -69,20 +67,32 @@ def get_loaders(
     return train_loader, val_loader
 
 # define train_loop
-def train_loop(model, loader, optim, loss_fn, scaler, epoch):
+def train_loop(model, loader, optim, loss_fn, scaler, epoch, multi_scale_training=True):
+    # these first 4 rows are copied from Ultralytics repo. They studied a mechanism to make model's learning
+    # batch_invariant for bs between 1 and 64: based on batch_size the loss is cumulated in the scaler (optimizer) but the
+    # frequency of scaler.step() (optim.step()) depends on the batch_size
+    # check here: https://github.com/ultralytics/yolov5/issues/2377
+    nbs = 64  # nominal batch size
+    batch_size = next(iter(loader))[0].shape[0]
+    accumulate = max(round(nbs / batch_size), 1)  # accumulate loss before optimizing
+    last_opt_step = -1
+
     loop = tqdm(loader)
     avg_batches_loss = 0
     loss_epoch = 0
+    nb = len(loader)
     for idx, (images, bboxes) in enumerate(loop):
-        # transferring data to cpu or gpu
-        images = multi_scale(images, target_shape=640, max_stride=32)
+        images = torch.stack(images, dim=0)
+
+        if multi_scale_training:
+            images = multi_scale(images, target_shape=640, max_stride=32)
+
         images = images.to(config.DEVICE)
         # BBOXES AND CLASSES ARE PUSHED to.(DEVICE) INSIDE THE LOSS_FN
 
-        # float16 training: reduces the load to the VRAM and speeds up the training
+        # float16 training: reduces the load inside the VRAM and speeds up the training
         with torch.cuda.amp.autocast():
             out = model(images)
-
             loss = loss_fn(out, bboxes, pred_size=images.shape[2:4], batch_idx=idx, epoch=epoch)
             avg_batches_loss += loss
 
@@ -90,8 +100,14 @@ def train_loop(model, loader, optim, loss_fn, scaler, epoch):
         # check docs here https://pytorch.org/docs/stable/amp.html
         optim.zero_grad()
         scaler.scale(loss).backward()
-        scaler.step(optim)
-        scaler.update()
+
+        if idx - last_opt_step >= accumulate or (idx == nb-1):
+            scaler.unscale_(optim)  # unscale gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # clip gradients
+            scaler.step(optim)  # optimizer.step
+            scaler.update()
+            optim.zero_grad()
+            last_opt_step = idx
 
         # update tqdm loop
         freq = 10

@@ -278,7 +278,7 @@ if __name__ == "__main__":
     first_out = 48
 
     model = YOLOV5m(first_out=first_out, nc=nc, anchors=anchors,
-                    ch=(first_out*4, first_out*8, first_out*16), inference=False)
+                    ch=(first_out*4, first_out*8, first_out*16), inference=True)
 
     start = time.time()
     out = model(x)
@@ -291,6 +291,8 @@ if __name__ == "__main__":
 
         print("Success!")
         print("forward took {:.2f} seconds".format(end-start))
+
+    print(out[0].shape)
 
     """
     print(count_parameters(model))

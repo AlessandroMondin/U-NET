@@ -1,17 +1,15 @@
-import matplotlib.pyplot as plt
+
 import torch
-#from model import check_size
 
 # Model
-model = torch.hub.load('ultralytics/yolov5', 'yolov5m')  # or yolov5n - yolov5x6, custom
-
-#check_size(model)
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s')  # or yolov5n - yolov5x6, custom
 
 # Images
-img = 'https://ultralytics.com/images/zidane.jpg'  # or file, Path, PIL, OpenCV, numpy, list
+#img = 'https://ultralytics.com/images/zidane.jpg'# or file, Path, PIL, OpenCV, numpy, list
+img = torch.rand(2, 3, 640, 640)
 
 # Inference
-#results = model(img)
+results = model(img)
 
 # Results
-#results.show()
+results.show()

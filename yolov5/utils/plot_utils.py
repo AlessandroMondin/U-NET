@@ -41,11 +41,45 @@ def cells_to_bboxes(predictions, anchors, S, is_preds=True):
         .unsqueeze(-1)
         .to(predictions.device)
     )
+
     x = 1 / S * (box_predictions[..., 0:1] + cell_indices)
     y = 1 / S * (box_predictions[..., 1:2] + cell_indices.permute(0, 1, 3, 2, 4))
     w_h = 1 / S * box_predictions[..., 2:4]
-    converted_bboxes = torch.cat((best_class, scores, x, y, w_h), dim=-1).reshape(BATCH_SIZE, num_anchors * S * S, 6)
-    return converted_bboxes.tolist()
+    scale_bboxes = torch.cat((best_class, scores, x, y, w_h), dim=-1).reshape(BATCH_SIZE, num_anchors * S * S, 6)
+    return scale_bboxes.tolist()
+
+
+def cells_to_bboxes2(predictions, anchors, strides, is_pred=False):
+    num_out_layers = len(predictions)
+    grid = [torch.empty(0) for _ in range(num_out_layers)]  # initialize
+    anchor_grid = [torch.empty(0) for _ in range(num_out_layers)]  # initialize
+    all_bboxes = []
+    for i in range(num_out_layers):
+        bs, naxs, ny, nx, _ = predictions[i].shape
+        stride = strides[i]
+        grid[i], anchor_grid[i] = make_grid(anchors, naxs, ny=ny, nx=nx, stride=stride, i=i)
+        obj = predictions[i][..., 0:1]
+        xy = (predictions[i][..., 1:3] + grid[i]) * stride
+        wh = predictions[i][..., 3:5] * stride # * anchor_grid[i]
+        best_class = predictions[i][..., 5:6]
+
+        scale_bboxes = torch.cat((best_class, obj, xy, wh), dim=-1).reshape(bs, -1, 6)
+
+        all_bboxes += scale_bboxes.tolist()[0]
+
+    return all_bboxes
+
+
+def make_grid(anchors, naxs, stride, nx=20, ny=20, i=0, pred=False):
+    d = anchors[i].device
+    t = anchors[i].dtype
+    shape = 1, naxs, ny, nx, 2  # grid shape
+    y, x = torch.arange(ny, device=d, dtype=t), torch.arange(nx, device=d, dtype=t)
+    yv, xv = torch.meshgrid(y, x, indexing='ij')
+    grid = torch.stack((xv, yv), 2).expand(shape)  # add grid offset, i.e. y = 2.0 * x - 0.5
+    anchor_grid = (anchors[i] * stride).view((1, naxs, 1, 1, 2)).expand(shape)
+
+    return grid, anchor_grid
 
 
 # ALADDIN'S ADAPTED
@@ -204,13 +238,16 @@ def save_predictions(model, loader, folder, epoch, device, num_images=10):
         break
 
 
-def plot_image(image, boxes):
+def plot_image(image, boxes, cell_to_bboxes1=True):
     """Plots predicted bounding boxes on the image"""
     cmap = plt.get_cmap("tab20b")
     class_labels = config.COCO_LABELS
     colors = [cmap(i) for i in np.linspace(0, 1, len(class_labels))]
     im = np.array(image)
-    height, width, _ = im.shape
+    if cell_to_bboxes1:
+        height, width, _ = im.shape
+    else:
+        height, width = 1, 1
 
     # Create figure and axes
     fig, ax = plt.subplots(1)
@@ -225,11 +262,18 @@ def plot_image(image, boxes):
         assert len(box) == 6, "box should contain class pred, confidence, x, y, width, height"
         class_pred = box[0]
         box = box[2:]
+
         upper_left_x = max(box[0] - box[2] / 2, 0)
-        upper_left_x = min(upper_left_x, 1)
+        if cell_to_bboxes1:
+            upper_left_x = min(upper_left_x, 1)
+        else:
+            upper_left_x = min(upper_left_x, im.shape[1])
 
         lower_left_y = max(box[1] - box[3] / 2, 0)
-        lower_left_y = min(lower_left_y, 1)
+        if cell_to_bboxes1:
+            lower_left_y = min(lower_left_y, 1)
+        else:
+            lower_left_y = min(lower_left_y, im.shape[0])
         rect = patches.Rectangle(
             (upper_left_x * width, lower_left_y * height),
             box[2] * width,

@@ -5,6 +5,9 @@ import numpy as np
 
 # Tensor.element_size() → int
 # Returns the size in bytes of an individual element.
+import config
+
+
 def check_size(model):
     param_size = 0
     for param in model.parameters():
@@ -16,6 +19,8 @@ def check_size(model):
     size_all_mb = (param_size + buffer_size) / 1024 ** 2
     print('model size: {:.3f}MB'.format(size_all_mb))
 
+def count_parameters(model):
+    print(sum(p.numel() for p in model.parameters() if p.requires_grad))
 
 def strip_model(model):
     model.half()
@@ -58,7 +63,8 @@ def save_checkpoint(state, folder_path, filename="my_checkpoint.pth.tar"):
 def load_model_checkpoint(checkpoint, model):
 
     print(f"=> Loading model saved in {checkpoint.rsplit('/')[-1]}...")
-    checkpoint = torch.load(checkpoint)
+
+    checkpoint = torch.load(checkpoint, map_location=config.DEVICE)
     model.load_state_dict(checkpoint["state_dict"])
 
 
@@ -68,8 +74,8 @@ def load_optim_checkpoint(checkpoint, optim):
     optim.load_state_dict(checkpoint["optimizer"])
 
 def resize_image(image, output_size):
+    # output size is [width, height]
     return cv2.resize(image, dsize=output_size, interpolation=cv2.INTER_LINEAR)
-
 
 def seed_everything(seed=42):
     os.environ['PYTHONHASHSEED'] = str(seed)

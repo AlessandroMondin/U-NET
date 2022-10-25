@@ -13,6 +13,9 @@ if "/Users/alessandro" in str(parent_dir):
     ROOT_DIR = os.path.join(parent_dir, "Desktop", "ML", "DL_DATASETS", "COCO")
 else:
     ROOT_DIR = os.path.join(parent_dir, "coco")
+FIRST_OUT = 48
+CLS_PW = 1.0
+OBJ_PW = 1.0
 LEARNING_RATE = 5e-5
 WEIGHT_DECAY = 1e-4
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -22,7 +25,7 @@ SAVE_IMAGES_PATH = "SageMaker/check/check"
 IMAGE_SIZE = 640
 
 
-CONF_THRESHOLD = 0.05  # ALADDIN set it to 0.05? Why so low?
+CONF_THRESHOLD = 0.50  # ALADDIN set it to 0.05? Why so low?
 MAP_IOU_THRESH = 0.5
 NMS_IOU_THRESH = 0.45
 
@@ -47,11 +50,11 @@ TRAIN_TRANSFORMS = A.Compose(
              # create rotated bboxes slightly smaller with rotate_method="ellipse" or
              # than gt_bboxes or quite wider with rotate_method="ellipse"largest_box"
              A.ShiftScaleRotate(
-                rotate_limit=45, p=0.5, border_mode=cv2.BORDER_CONSTANT, rotate_method="ellipse",
+                rotate_limit=30, p=0.5, border_mode=cv2.BORDER_CONSTANT, rotate_method="ellipse",
                 scale_limit=0.0, shift_limit=0
              ),
              A.ShiftScaleRotate(
-                rotate_limit=45, p=0.5, border_mode=cv2.BORDER_CONSTANT, rotate_method="largest_box",
+                rotate_limit=30, p=0.5, border_mode=cv2.BORDER_CONSTANT, rotate_method="largest_box",
                 scale_limit=0.0, shift_limit=0)
             ],
             p=0.7
@@ -82,15 +85,27 @@ VAL_TRANSFORM = A.Compose(
     bbox_params=A.BboxParams(format="coco", min_visibility=0.4, label_fields=[]),
 )
 
+TEST_TRANSFORM = A.Compose(
+    [
+        A.LongestMaxSize(max_size=IMAGE_SIZE),
+        A.PadIfNeeded(
+            min_height=IMAGE_SIZE, min_width=IMAGE_SIZE, border_mode=cv2.BORDER_CONSTANT
+        ),
+        A.Normalize(mean=[0, 0, 0], std=[1, 1, 1], max_pixel_value=255,),
+        ToTensorV2(),
+    ],
+)
+
+
 ADAPTIVE_TRAIN_TRANSFORM = A.Compose(
     # removing the A.Resize from the augmentations
-    TRAIN_TRANSFORMS[1:],
+    TRAIN_TRANSFORMS[2:],
     bbox_params=A.BboxParams(format="coco", min_visibility=0.4, label_fields=[])
 )
 
 ADAPTIVE_VAL_TRANSFORM = A.Compose(
     # removing the A.Resize from the augmentations
-    VAL_TRANSFORM[1:],
+    VAL_TRANSFORM[2:],
     bbox_params=A.BboxParams(format="coco", min_visibility=0.4, label_fields=[])
 )
 
